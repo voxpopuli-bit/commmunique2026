@@ -1980,13 +1980,26 @@ function cmRenderMastersEvent(event,seq=CM_STATE.viewSeq){
   });
   cmPanelBody.querySelectorAll('[data-master-id]').forEach(input=>input.addEventListener('change',async e=>{
     const id=e.target.dataset.masterId, r=regs.find(x=>x.id===id); if(!r)return;
-    const m=cmMasterForRegistration(r)||{}; await cmUpsertMaster({...m,registration_id:r.id,event:r.event,sl_no:r.sl,name:r.name,college:r.college,present:e.target.checked,score:Number(m.score)||0});
-    e.target.nextElementSibling.textContent=e.target.checked?"YES":"NO";
+    const m=cmMasterForRegistration(r)||{};
+    try{
+      await cmUpsertMaster({...m,registration_id:r.id,event:r.event,present:e.target.checked,score:Number(m.score)||0});
+      e.target.nextElementSibling.textContent=e.target.checked?"YES":"NO";
+    }catch(err){
+      console.error("Could not save attendance to cloud:",err);
+      alert("CLOUD SAVE FAILED. PLEASE TRY AGAIN.");
+    }
   }));
   cmPanelBody.querySelectorAll('[data-score-id]').forEach(input=>input.addEventListener('change',async e=>{
     const id=e.target.dataset.scoreId, r=regs.find(x=>x.id===id); if(!r)return;
-    const m=cmMasterForRegistration(r)||{}; await cmUpsertMaster({...m,registration_id:r.id,event:r.event,sl_no:r.sl,name:r.name,college:r.college,present:Boolean(m.present),score:Number(e.target.value)||0});
-    e.target.value=Number(e.target.value)||0;
+    const m=cmMasterForRegistration(r)||{};
+    const value=Number(e.target.value)||0;
+    try{
+      await cmUpsertMaster({...m,registration_id:r.id,event:r.event,present:Boolean(m.present),score:value});
+      e.target.value=value;
+    }catch(err){
+      console.error("Could not save score to cloud:",err);
+      alert("CLOUD SAVE FAILED. PLEASE TRY AGAIN.");
+    }
   }));
   })();
 }
@@ -2250,56 +2263,6 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape" && cmOverlay.classLi
 </script>
 
 
-<script id="communique-cloud-score-hooks">
-(function(){
-  function attachCloudHooks(){
-    if(window.cmCloudHooksAttached) return;
-    window.cmCloudHooksAttached = true;
-
-    document.addEventListener("change", async function(e){
-      const el = e.target;
-      if(!el) return;
-
-      const scoreId = el.dataset && el.dataset.scoreId;
-      const masterId = el.dataset && el.dataset.masterId;
-      if(!scoreId && !masterId) return;
-
-      const id = scoreId || masterId;
-      const regs = Array.isArray(CM_STATE.registrations) ? CM_STATE.registrations : [];
-      const reg = regs.find(r => String(r.id) === String(id));
-      if(!reg) return;
-
-      const existing = (CM_STATE.masters||[]).find(m =>
-        String(m.registration_id) === String(reg.id) &&
-        cmNorm(m.event) === cmNorm(reg.event)
-      ) || {};
-
-      const scoreEl = document.querySelector('[data-score-id="'+CSS.escape(String(reg.id))+'"]');
-      const presentEl = document.querySelector('[data-master-id="'+CSS.escape(String(reg.id))+'"]');
-
-      const row = {
-        registration_id: reg.id,
-        event: reg.event,
-        present: presentEl ? Boolean(presentEl.checked) : Boolean(existing.present),
-        score: scoreEl ? Number(scoreEl.value)||0 : Number(existing.score)||0
-      };
-
-      try{
-        await cmUpsertMaster(row);
-      }catch(err){
-        console.error("Could not save score to cloud:",err);
-        alert("CLOUD SAVE FAILED. PLEASE CHECK YOUR CONNECTION AND TRY AGAIN.");
-      }
-    });
-  }
-
-  if(document.readyState === "loading"){
-    document.addEventListener("DOMContentLoaded",attachCloudHooks,{once:true});
-  }else{
-    attachCloudHooks();
-  }
-})();
-</script>
 
 
 <script id="communique-cloud-realtime-hook">
@@ -2339,16 +2302,10 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape" && cmOverlay.classLi
         if(label) label.textContent = incoming.present ? "YES" : "NO";
       });
 
-      const activeEvent = CM_STATE.selectedEvent;
-      if(activeEvent && cmNorm(activeEvent) === cmNorm(incoming.event)){
-        // Refresh the visible scoring/masters table without forcing a page reload.
-        setTimeout(()=>{
-          try{
-            if(CM_STATE.section === "scoring") cmRenderScoringEvent(activeEvent,CM_STATE.viewSeq);
-            if(CM_STATE.section === "masters") cmRenderMastersEvent(activeEvent,CM_STATE.viewSeq);
-          }catch(e){}
-        },80);
-      }
+      // Do not re-render the whole table here.
+      // Realtime already updates the changed score/attendance input above.
+      // Re-rendering after every keystroke/change makes the page appear to refresh
+      // and can interrupt the user's interaction with the table.
     });
   };
 
