@@ -1088,6 +1088,80 @@ footer{padding:45px 20px 68px;text-align:center;color:#7d756e;font-size:11px}
 }
 </style>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<script id="communique-supabase-cloud">
+(function(){
+  const url = 'https://zinkqphfzaimoqypeatt.supabase.co';
+  const key = 'sb_publishable_l_jhjda59EBfoQ9EJTe1hg_qj_-eGdw';
+
+  if(window.supabase && typeof window.supabase.createClient === "function"){
+    window.cmSupabase = window.supabase.createClient(url,key,{
+      auth:{
+        persistSession:true,
+        autoRefreshToken:true,
+        detectSessionInUrl:true
+      }
+    });
+  }
+
+  window.CM_CLOUD = {
+    async loadAll(){
+      if(!window.cmSupabase) return [];
+      const res = await window.cmSupabase
+        .from("event_masters")
+        .select("id,registration_id,event,present,score,updated_at")
+        .order("updated_at",{ascending:false});
+      if(res.error){
+        console.error("Cloud load failed:",res.error);
+        return [];
+      }
+      return res.data || [];
+    },
+
+    async save(row){
+      if(!window.cmSupabase) throw new Error("Cloud is not connected");
+      const payload = {
+        registration_id:String(row.registration_id),
+        event:String(row.event),
+        present:Boolean(row.present),
+        score:Number(row.score)||0,
+        updated_at:new Date().toISOString()
+      };
+      const res = await window.cmSupabase
+        .from("event_masters")
+        .upsert(payload,{onConflict:"registration_id,event"})
+        .select()
+        .single();
+      if(res.error) throw res.error;
+      return res.data;
+    },
+
+    subscribe(event,onChange){
+      if(!window.cmSupabase) return null;
+      const channelName = "cm-live-" + String(event || "all")
+        .replace(/[^A-Za-z0-9_-]/g,"_");
+      const channel = window.cmSupabase.channel(channelName);
+
+      const cfg = {
+        event:"*",
+        schema:"public",
+        table:"event_masters"
+      };
+      if(event) cfg.filter = "event=eq." + String(event).replace(/[,]/g,"%2C");
+
+      channel.on("postgres_changes",cfg,payload=>{
+        if(typeof onChange === "function") onChange(payload);
+      }).subscribe();
+
+      return channel;
+    }
+  };
+
+  window.CM_CLOUD_READY = Boolean(window.cmSupabase);
+})();
+</script>
+
 </head>
 
 <body>
@@ -1385,8 +1459,8 @@ const CM_CONFIG = {
   SHEET_GVIZ_URL: "",
   /* Google Apps Script Web App endpoint supplied for the live registration source. */
   SHEET_APPS_SCRIPT_URL: "https://script.google.com/macros/s/AKfycbyUKaS4i8gQMmF2yl4Gp4rPjGJxdgVhwXEML_wJShSuKJzPrW0ytGDFkUOAh0UF_U0U/exec",
-  SUPABASE_URL: "",
-  SUPABASE_ANON_KEY: "",
+  SUPABASE_URL: "https://zinkqphfzaimoqypeatt.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_l_jhjda59EBfoQ9EJTe1hg_qj_-eGdw",
   /* One universal admin login for BOTH Event Masters and Scoring. */
   ADMIN_PASSWORD: "VOXBESC2026",
   POLL_MS: 20000,
@@ -1652,44 +1726,37 @@ async function cmLoadRegistrations({force=false,events=null}={}){
 }
 
 async function cmLoadMasters(){
-  const local=cmLoadLocalMasters();
-  if(CM_CONFIG.SUPABASE_URL && CM_CONFIG.SUPABASE_ANON_KEY){
-    try{
-      const res=await fetch(`${CM_CONFIG.SUPABASE_URL.replace(/\/$/,"")}/rest/v1/event_masters?select=*`,{
-        headers:{apikey:CM_CONFIG.SUPABASE_ANON_KEY,Authorization:`Bearer ${CM_CONFIG.SUPABASE_ANON_KEY}`},cache:"no-store"
-      });
-      if(res.ok){ CM_STATE.masters=await res.json(); return; }
-    }catch(err){ console.error(err); }
+  if(window.CM_CLOUD){
+    const rows = await window.CM_CLOUD.loadAll();
+    if(rows.length || window.cmSupabase){
+      CM_STATE.masters = rows;
+      return rows;
+    }
   }
-  CM_STATE.masters=local;
+  return CM_STATE.masters || [];
 }
 
-async function cmUpsertMaster(record){
-  const normalized={
-    registration_id:record.registration_id,
-    event:record.event,
-    sl_no:Number(record.sl_no)||0,
-    name:record.name,
-    college:record.college,
-    present:Boolean(record.present),
-    score:Number(record.score)||0,
-    updated_at:new Date().toISOString()
+async function cmUpsertMaster(m){
+  const row = {
+    registration_id: m.registration_id || m.id,
+    event: m.event,
+    present: Boolean(m.present),
+    score: Number(m.score)||0
   };
-  const idx=CM_STATE.masters.findIndex(x=>cmNorm(x.registration_id)===cmNorm(normalized.registration_id));
-  if(idx>=0) CM_STATE.masters[idx]={...CM_STATE.masters[idx],...normalized}; else CM_STATE.masters.push(normalized);
-  cmSaveLocalMasters(CM_STATE.masters);
 
-  if(CM_CONFIG.SUPABASE_URL && CM_CONFIG.SUPABASE_ANON_KEY){
-    const base=CM_CONFIG.SUPABASE_URL.replace(/\/$/,"");
-    try{
-      const res=await fetch(`${base}/rest/v1/event_masters?on_conflict=registration_id`,{
-        method:"POST",
-        headers:{apikey:CM_CONFIG.SUPABASE_ANON_KEY,Authorization:`Bearer ${CM_CONFIG.SUPABASE_ANON_KEY}`,"Content-Type":"application/json",Prefer:"resolution=merge-duplicates,return=minimal"},
-        body:JSON.stringify(normalized)
-      });
-      if(!res.ok) throw new Error(`SUPABASE HTTP ${res.status}`);
-    }catch(err){console.error(err);}
-  }
+  if(!window.CM_CLOUD) return row;
+
+  const saved = await window.CM_CLOUD.save(row);
+
+  const idx = CM_STATE.masters.findIndex(x =>
+    String(x.registration_id) === String(saved.registration_id) &&
+    cmNorm(x.event) === cmNorm(saved.event)
+  );
+
+  if(idx >= 0) CM_STATE.masters[idx] = saved;
+  else CM_STATE.masters.push(saved);
+
+  return saved;
 }
 
 async function cmSyncAll(){
@@ -1708,6 +1775,7 @@ function cmOpen(section){
   cmRenderCurrent();
 }
 function cmClose(){
+  if(window.cmStopCloudRealtime) window.cmStopCloudRealtime();
   cmOverlay.classList.remove("open"); cmOverlay.setAttribute("aria-hidden","true");
   document.body.style.overflow="";
   CM_STATE.section=null; CM_STATE.selectedEvent=null;
@@ -1745,57 +1813,92 @@ function cmShowEventChooser(section){
   }));
 }
 
-function cmGate(kind){
-  const isMasters = kind === "masters";
-  const requiresEmail = true;
-  const password = CM_CONFIG.ADMIN_PASSWORD;
-  const label = isMasters ? "EVENT MASTERS" : "SCORING";
-  cmHeader(label,`SECURE ADMIN ACCESS · ${label}`);
+async function cmGate(kind){
+  const label = kind === "masters" ? "EVENT MASTERS" : "SCORING";
+  cmHeader(label,`SECURE CLOUD ACCESS · ${label}`);
   cmPanelBody.innerHTML = `
     <div class="cm-gate">
       <div class="cm-auth-brand">COMMUNIQUÉ 2026</div>
       <h3>WELCOME, ADMINISTRATOR</h3>
-      <p>ENTER YOUR COLLEGE ADMIN EMAIL AND UNIVERSAL ADMIN PASSWORD TO CONTINUE.</p>
+      <p>ENTER YOUR REGISTERED EMAIL AND PASSWORD TO CONTINUE.</p>
       <form id="cmGateForm" class="cm-auth-form" novalidate>
-        ${requiresEmail ? `<label class="cm-auth-field"><span class="cm-auth-label">EMAIL ADDRESS</span><input class="cm-input cm-auth-input" id="cmGateEmail" type="email" inputmode="email" autocomplete="username" placeholder="0101251786@thebges.edu.in" required></label>` : ''}
-        <label class="cm-auth-field"><span class="cm-auth-label">PASSWORD</span><input class="cm-input cm-auth-input" id="cmGateInput" type="password" autocomplete="current-password" placeholder="ENTER PASSWORD" required></label>
+        <label class="cm-auth-field">
+          <span class="cm-auth-label">EMAIL ADDRESS</span>
+          <input class="cm-input cm-auth-input" id="cmGateEmail" type="email"
+            inputmode="email" autocomplete="username"
+            placeholder="ENTER EMAIL" required>
+        </label>
+        <label class="cm-auth-field">
+          <span class="cm-auth-label">PASSWORD</span>
+          <input class="cm-input cm-auth-input" id="cmGateInput" type="password"
+            autocomplete="current-password" placeholder="ENTER PASSWORD" required>
+        </label>
         <button class="cm-btn cm-auth-submit" type="submit">LOGIN</button>
       </form>
       <div class="cm-msg cm-auth-note" id="cmGateMsg"></div>
     </div>`;
-  setTimeout(()=>document.getElementById(requiresEmail?"cmGateEmail":"cmGateInput")?.focus(),140);
-  document.getElementById("cmGateForm").onsubmit=(e)=>{
+
+  const form = document.getElementById("cmGateForm");
+  const msg = document.getElementById("cmGateMsg");
+  const emailEl = document.getElementById("cmGateEmail");
+  const passEl = document.getElementById("cmGateInput");
+  if(!form || !msg || !emailEl || !passEl) return;
+
+  setTimeout(()=>emailEl.focus(),140);
+
+  form.onsubmit = async (e) => {
     e.preventDefault();
-    const msg=document.getElementById("cmGateMsg");
     msg.classList.remove("cm-auth-error");
-    if(requiresEmail){
-      const email=(document.getElementById("cmGateEmail")?.value||"").trim().toLowerCase();
-      if(!/^\S+@\S+\.\S+$/.test(email)){
-        msg.textContent="PLEASE ENTER A VALID EMAIL ADDRESS";
-        msg.classList.add("cm-auth-error");
-        document.getElementById("cmGateEmail")?.focus();
-        return;
-      }
-    }
-    const val=document.getElementById("cmGateInput").value;
-    if(val===password){
-      sessionStorage.setItem(kind==="masters"?"cm_masters_auth":"cm_scoring_auth","1");
-      if(requiresEmail) sessionStorage.setItem(kind==="masters"?"cm_masters_email":"cm_scoring_email",(document.getElementById("cmGateEmail")?.value||"").trim());
-      cmShowEventChooser(kind);
-    } else {
-      msg.textContent="ACCESS DENIED · INVALID PASSWORD";
+    msg.textContent = "CHECKING CLOUD ACCESS…";
+
+    if(!window.cmSupabase){
+      msg.textContent = "CLOUD CONNECTION NOT AVAILABLE";
       msg.classList.add("cm-auth-error");
-      document.getElementById("cmGateInput")?.select();
+      return;
     }
+
+    const email = emailEl.value.trim().toLowerCase();
+    const password = passEl.value;
+
+    if(!/^\S+@\S+\.\S+$/.test(email)){
+      msg.textContent = "PLEASE ENTER A VALID EMAIL ADDRESS";
+      msg.classList.add("cm-auth-error");
+      emailEl.focus();
+      return;
+    }
+
+    const {data,error} = await window.cmSupabase.auth.signInWithPassword({email,password});
+    if(error || !data?.user){
+      msg.textContent = "ACCESS DENIED · INVALID LOGIN";
+      msg.classList.add("cm-auth-error");
+      passEl.select();
+      return;
+    }
+
+    sessionStorage.setItem(
+      kind==="masters" ? "cm_masters_auth" : "cm_scoring_auth", "1"
+    );
+    sessionStorage.setItem(
+      kind==="masters" ? "cm_masters_email" : "cm_scoring_email", email
+    );
+
+    cmShowEventChooser(kind);
   };
 }
-function cmRenderMastersGate(){
-  if(sessionStorage.getItem("cm_masters_auth")==="1") cmShowEventChooser("masters");
-  else cmGate("masters");
+
+async function cmRenderMastersGate(){
+  if(window.cmSupabase){
+    const {data} = await window.cmSupabase.auth.getSession();
+    if(data?.session){ cmShowEventChooser("masters"); return; }
+  }
+  cmGate("masters");
 }
-function cmRenderScoringGate(){
-  if(sessionStorage.getItem("cm_scoring_auth")==="1") cmShowEventChooser("scoring");
-  else cmGate("scoring");
+async function cmRenderScoringGate(){
+  if(window.cmSupabase){
+    const {data} = await window.cmSupabase.auth.getSession();
+    if(data?.session){ cmShowEventChooser("scoring"); return; }
+  }
+  cmGate("scoring");
 }
 function cmFilteredRegs(event){ return CM_STATE.registrations.filter(r=>cmNorm(r.event)===cmNorm(event)); }
 function cmRegistrationDetails(reg){
@@ -1805,6 +1908,7 @@ function cmRegistrationDetails(reg){
 }
 function cmShowEvent(section,event){
   CM_STATE.selectedEvent=event;
+  if(window.cmStartCloudRealtime) window.cmStartCloudRealtime(event);
   CM_STATE.viewSeq=(CM_STATE.viewSeq||0)+1;
   const seq=CM_STATE.viewSeq;
   if(section==="registration") cmRenderRegistrationEvent(event,seq);
@@ -2142,6 +2246,127 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape" && cmOverlay.classLi
 
   window.cmRasaStartSound = startLuckyDrawSound;
   window.cmRasaFinishSound = finishLuckyDrawSound;
+})();
+</script>
+
+
+<script id="communique-cloud-score-hooks">
+(function(){
+  function attachCloudHooks(){
+    if(window.cmCloudHooksAttached) return;
+    window.cmCloudHooksAttached = true;
+
+    document.addEventListener("change", async function(e){
+      const el = e.target;
+      if(!el) return;
+
+      const scoreId = el.dataset && el.dataset.scoreId;
+      const masterId = el.dataset && el.dataset.masterId;
+      if(!scoreId && !masterId) return;
+
+      const id = scoreId || masterId;
+      const regs = Array.isArray(CM_STATE.registrations) ? CM_STATE.registrations : [];
+      const reg = regs.find(r => String(r.id) === String(id));
+      if(!reg) return;
+
+      const existing = (CM_STATE.masters||[]).find(m =>
+        String(m.registration_id) === String(reg.id) &&
+        cmNorm(m.event) === cmNorm(reg.event)
+      ) || {};
+
+      const scoreEl = document.querySelector('[data-score-id="'+CSS.escape(String(reg.id))+'"]');
+      const presentEl = document.querySelector('[data-master-id="'+CSS.escape(String(reg.id))+'"]');
+
+      const row = {
+        registration_id: reg.id,
+        event: reg.event,
+        present: presentEl ? Boolean(presentEl.checked) : Boolean(existing.present),
+        score: scoreEl ? Number(scoreEl.value)||0 : Number(existing.score)||0
+      };
+
+      try{
+        await cmUpsertMaster(row);
+      }catch(err){
+        console.error("Could not save score to cloud:",err);
+        alert("CLOUD SAVE FAILED. PLEASE CHECK YOUR CONNECTION AND TRY AGAIN.");
+      }
+    });
+  }
+
+  if(document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded",attachCloudHooks,{once:true});
+  }else{
+    attachCloudHooks();
+  }
+})();
+</script>
+
+
+<script id="communique-cloud-realtime-hook">
+(function(){
+  let activeChannel = null;
+
+  window.cmStartCloudRealtime = function(event){
+    if(!window.CM_CLOUD || !window.cmSupabase) return;
+
+    if(activeChannel){
+      try{ window.cmSupabase.removeChannel(activeChannel); }catch(e){}
+    }
+
+    activeChannel = window.CM_CLOUD.subscribe(event, function(payload){
+      const incoming = payload?.new;
+      if(!incoming) return;
+
+      const idx = (CM_STATE.masters||[]).findIndex(m =>
+        String(m.registration_id) === String(incoming.registration_id) &&
+        cmNorm(m.event) === cmNorm(incoming.event)
+      );
+
+      if(payload.eventType === "DELETE"){
+        if(idx >= 0) CM_STATE.masters.splice(idx,1);
+      }else if(idx >= 0){
+        CM_STATE.masters[idx] = incoming;
+      }else{
+        CM_STATE.masters.push(incoming);
+      }
+
+      document.querySelectorAll('[data-score-id="'+CSS.escape(String(incoming.registration_id))+'"]').forEach(el=>{
+        el.value = Number(incoming.score)||0;
+      });
+      document.querySelectorAll('[data-master-id="'+CSS.escape(String(incoming.registration_id))+'"]').forEach(el=>{
+        el.checked = Boolean(incoming.present);
+        const label = el.closest("label")?.querySelector("span");
+        if(label) label.textContent = incoming.present ? "YES" : "NO";
+      });
+
+      const activeEvent = CM_STATE.selectedEvent;
+      if(activeEvent && cmNorm(activeEvent) === cmNorm(incoming.event)){
+        // Refresh the visible scoring/masters table without forcing a page reload.
+        setTimeout(()=>{
+          try{
+            if(CM_STATE.section === "scoring") cmRenderScoringEvent(activeEvent,CM_STATE.viewSeq);
+            if(CM_STATE.section === "masters") cmRenderMastersEvent(activeEvent,CM_STATE.viewSeq);
+          }catch(e){}
+        },80);
+      }
+    });
+  };
+
+  window.cmStopCloudRealtime = function(){
+    if(activeChannel && window.cmSupabase){
+      try{ window.cmSupabase.removeChannel(activeChannel); }catch(e){}
+    }
+    activeChannel = null;
+  };
+})();
+</script>
+
+
+<script id="communique-cloud-status">
+(function(){
+  window.cmCloudStatus = function(){
+    return window.cmSupabase ? "CONNECTED" : "OFFLINE";
+  };
 })();
 </script>
 
