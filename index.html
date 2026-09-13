@@ -1162,6 +1162,9 @@ footer{padding:45px 20px 68px;text-align:center;color:#7d756e;font-size:11px}
 })();
 </script>
 
+<style id="cm-scroll-stability">
+.cm-panel-body,.cm-table-wrap,.cm-table-scroll{overflow-anchor:none!important;}
+</style>
 </head>
 
 <body>
@@ -1978,29 +1981,112 @@ function cmRenderMastersEvent(event,seq=CM_STATE.viewSeq){
     await cmLoadEventRegistrations(event,{force:true});
     cmRenderMastersEvent(event,CM_STATE.viewSeq);
   });
+  function cmRememberEditorPosition(){
+    const active=document.activeElement;
+    const tableWrap=cmPanelBody.querySelector('.cm-table-wrap');
+    const scrollers=[];
+    const seen=new Set();
+
+    function addScroller(el){
+      if(!el || seen.has(el)) return;
+      seen.add(el);
+      scrollers.push({
+        el,
+        top:el.scrollTop,
+        left:el.scrollLeft
+      });
+    }
+
+    addScroller(document.scrollingElement);
+    addScroller(cmOverlay);
+    addScroller(cmPanelBody);
+    addScroller(tableWrap);
+
+    let node=active;
+    while(node && node!==document.body){
+      if(node.scrollHeight>node.clientHeight || node.scrollWidth>node.clientWidth) addScroller(node);
+      node=node.parentElement;
+    }
+
+    return {
+      active,
+      scrollers,
+      pageX:window.scrollX,
+      pageY:window.scrollY
+    };
+  }
+
+  function cmRestoreEditorPosition(pos){
+    if(!pos) return;
+
+    const restore=()=>{
+      // Restore every scroll container, not just the main table.
+      pos.scrollers.forEach(item=>{
+        if(item.el && item.el.isConnected){
+          item.el.scrollTop=item.top;
+          item.el.scrollLeft=item.left;
+        }
+      });
+
+      window.scrollTo(pos.pageX,pos.pageY);
+
+      // IMPORTANT: do not call focus() here.
+      // On some mobile browsers focusing the input again automatically scrolls
+      // the table back toward the left/top.
+    };
+
+    restore();
+    requestAnimationFrame(restore);
+    setTimeout(restore,50);
+    setTimeout(restore,150);
+    setTimeout(restore,300);
+    setTimeout(restore,600);
+    setTimeout(restore,1000);
+  }
+
   cmPanelBody.querySelectorAll('[data-master-id]').forEach(input=>input.addEventListener('change',async e=>{
+    e.stopPropagation();
     const id=e.target.dataset.masterId, r=regs.find(x=>x.id===id); if(!r)return;
     const m=cmMasterForRegistration(r)||{};
+    const pos=cmRememberEditorPosition();
     try{
-      await cmUpsertMaster({...m,registration_id:r.id,event:r.event,present:e.target.checked,score:Number(m.score)||0});
+      await cmUpsertMaster({
+        registration_id:r.id,
+        event:r.event,
+        present:e.target.checked,
+        score:Number(m.score)||0
+      });
       e.target.nextElementSibling.textContent=e.target.checked?"YES":"NO";
     }catch(err){
       console.error("Could not save attendance to cloud:",err);
       alert("CLOUD SAVE FAILED. PLEASE TRY AGAIN.");
+    }finally{
+      cmRestoreEditorPosition(pos);
     }
   }));
+
   cmPanelBody.querySelectorAll('[data-score-id]').forEach(input=>input.addEventListener('change',async e=>{
+    e.stopPropagation();
     const id=e.target.dataset.scoreId, r=regs.find(x=>x.id===id); if(!r)return;
     const m=cmMasterForRegistration(r)||{};
     const value=Number(e.target.value)||0;
+    const pos=cmRememberEditorPosition();
     try{
-      await cmUpsertMaster({...m,registration_id:r.id,event:r.event,present:Boolean(m.present),score:value});
+      await cmUpsertMaster({
+        registration_id:r.id,
+        event:r.event,
+        present:Boolean(m.present),
+        score:value
+      });
       e.target.value=value;
     }catch(err){
       console.error("Could not save score to cloud:",err);
       alert("CLOUD SAVE FAILED. PLEASE TRY AGAIN.");
+    }finally{
+      cmRestoreEditorPosition(pos);
     }
   }));
+
   })();
 }
 
@@ -2293,19 +2379,26 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape" && cmOverlay.classLi
         CM_STATE.masters.push(incoming);
       }
 
-      document.querySelectorAll('[data-score-id="'+CSS.escape(String(incoming.registration_id))+'"]').forEach(el=>{
-        el.value = Number(incoming.score)||0;
+      // Remember the exact current scroll position before applying remote updates.
+      const activeNow=document.activeElement;
+      const before=cmRememberEditorPosition();
+
+      const rid=String(incoming.registration_id).replace(/\\/g,"\\\\").replace(/"/g,'\\\"');
+      document.querySelectorAll('[data-score-id="'+CSS.escape(rid)+'"]').forEach(el=>{
+        // Never replace the value of the input the user is currently editing.
+        if(el!==activeNow) el.value = Number(incoming.score)||0;
       });
-      document.querySelectorAll('[data-master-id="'+CSS.escape(String(incoming.registration_id))+'"]').forEach(el=>{
-        el.checked = Boolean(incoming.present);
-        const label = el.closest("label")?.querySelector("span");
-        if(label) label.textContent = incoming.present ? "YES" : "NO";
+      document.querySelectorAll('[data-master-id="'+CSS.escape(rid)+'"]').forEach(el=>{
+        if(el!==activeNow){
+          el.checked=Boolean(incoming.present);
+          if(el.nextElementSibling) el.nextElementSibling.textContent=el.checked?"YES":"NO";
+        }
       });
 
-      // Do not re-render the whole table here.
-      // Realtime already updates the changed score/attendance input above.
-      // Re-rendering after every keystroke/change makes the page appear to refresh
-      // and can interrupt the user's interaction with the table.
+      // Realtime updates must never move the operator's viewport.
+      cmRestoreEditorPosition(before);
+
+      // Do not re-render the whole table here. The DOM stays in place.
     });
   };
 
